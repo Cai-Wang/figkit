@@ -176,8 +176,8 @@ class A4Grid:
 
             ext_panel = 0
 
-            # ── 右轴元素向左延伸（ylabel + 文本/标签） ──
-            for t in [right_ax.yaxis.label] + right_ax.texts:
+            # ── 右轴元素向左延伸（ylabel + yticklabels + 文本） ──
+            for t in [right_ax.yaxis.label] + right_ax.get_yticklabels() + right_ax.texts:
                 b = inv.transform(t.get_window_extent(renderer))
                 tb_left = min(b[:, 0])
                 e = (right_ax.get_position().x0 - tb_left) * self.paper_w
