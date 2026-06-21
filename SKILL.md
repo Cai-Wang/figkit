@@ -55,19 +55,32 @@ plt.rcParams['xtick.minor.size'] = fmt.format_params['tick_length_minor']
 - 所有图的图例样式（字号、位置、边框、纯色点不显示线条）
 - 所有图的数据点线粗和点大小（全局默认值）
 
-## 出图顺序（六步法）
+## 出图顺序（新流程 v2.1 — 推荐）
+
+**核心变化：视觉参数前置传入 IgneousWR，不再事后覆写。** `apply_format` / `apply_style` 已废弃（旧流程保留但勿用——tick_params 全量重置破坏后置轴样式）。
 
 ```
-1. 搭画布   → A4Grid(...)                              figkit 布局
-2. 画内容   → plot_*(gd, ax=ax)                        IgneousWR 内容
-3. 收尾     → layout.finalize(...)                      figkit 布局
-4. 格式把关 → apply_format(layout, fmt)                figkit 格式
-5. 风格覆盖 → apply_style(layout, 'default')            figkit 风格
-6. 保存     → layout.save(path)
+1. 定风格        → style dict + plt.rcParams              调用方（字号/字体/刻度尺寸/线粗/点大小）
+2. 搭画布        → layout = A4Grid(...)                    figkit 布局
+   cell          → layout.add_subplot(row, col, label='..')
+3. 画内容        → plot_*(gd, ax=ax, **style)              IgneousWR（视觉参数一次画到位）
+4. 排版          → layout.finalize(pairs=...)              figkit auto_gap（⚠ 内部 draw 重置 Tick）
+5. 后置轴样式    → apply_spider_axis_style(ax) /           IgneousWR Tick 级（每个子图单独调）
+                    apply_ree_axis_style(ax)
+6. 保存          → layout.save(path)                       figkit（save 不重建 Tick）
 ```
 
-第4步：IgneousWR 内部不设字号，apply_format 统一设置所有文字字号、字体、图例边框。  
-第5步：apply_style 覆盖数据线粗/点大小；从 IgneousWR 画线时设的 `label=` 创建**共享图例**（只画在第一个子图上，仅显示色点不显示线条）。
+**时序铁律：** `plot_*` → `finalize` → `apply_*_axis_style` → `save`。违反则刻度交替不生效。
+
+第5步必须放在 finalize **之后**。`apply_*_axis_style` 内部有 `fig.canvas.draw()`——这是全流程最后一次 draw。
+
+### 旧流程（deprecated — 勿用）
+
+以下两步会重置 tick 属性，导致后置轴样式失效：
+- `apply_format(layout, fmt)` — 内部调 `ax.tick_params(labelsize=...)` 全量重置 tick
+- `apply_style(layout, 'default')` — 调 `set_sizes`/`set_linewidth` 覆盖数据线属性
+
+新流程中所有视觉参数（字号、字体、线粗、点大小、刻度尺寸）通过 `plt.rcParams` 和 `plot_*` 参数前置传入。
 
 ## 共享图例行为
 
@@ -88,13 +101,57 @@ plt.rcParams['xtick.minor.size'] = fmt.format_params['tick_length_minor']
 5. 调好后的参数通过 `skill_manage action='patch'` 存为预设
 ## 踩坑记录
 
+### 字体大小 vs 画布尺寸不匹配（2026-06-26 发现）
+
+**新流程的漏洞：** `apply_format` 废弃后，字号由 `plt.rcParams['font.size']` 统一设一次。但同一个字号在不同画布上效果不同：
+
+| 场景 | 图宽 | 29个蛛网标签 | 结果 |
+|------|------|-------------|------|
+| 裸图预览 | 8" (203mm) | 每标签 ~7.0mm | 正常 |
+| A4 拼版 cell (1×2) | 75mm | 每标签 ~2.6mm | **重叠** |
+
+**根因：** 旧流程的 `apply_format` 会根据格式预设调字号（`A4-1x2-ree-spider` 预设 8pt vs `A4-2x2-standard` 预设 12pt）。新流程没有这个按布局调字号的机制。
+
+**避免方法：** 裸图和拼版不能用同一个 `plt.rcParams['font.size']`。出图脚本里按场景分别设置：
+
+```python
+# 裸图预览：正常字号
+plt.rcParams['font.size'] = 9
+
+# 拼版（A4 1×2 REE+spider）：缩小字号
+plt.rcParams['font.size'] = 7    # 75mm cell 容纳 29 个蛛网标签
+```
+
+### 裸图画布尺寸（2026-06-26 发现）
+
+**问题：** 裸图预览不应套用 A4 拼版的 cell 尺寸。裸图目的是给人看内容是否正确，用正常宽高比。
+
+**避免方法：** 裸图用 `figsize=(8, 5)` 或 `(6, 4)`，拼版才用 A4 单元格尺寸。两者传同样的 `ax=ax` 参数和 `**style` 视觉参数，只是画布尺寸不同。
+
+```
+# ✅ 裸图
+fig, ax = plt.subplots(figsize=(8, 5))
+plot_spider(gd, ax=ax, **style)
+apply_spider_axis_style(ax)
+fig.savefig('bare.png')
+
+# ✅ 拼版（画布尺寸不同，视觉参数相同）
+layout = A4Grid(1, 2, paper='A4', ...)
+ax = layout.add_subplot(0, 0, label='sp')
+plot_spider(gd, ax=ax, **style)       # 同一套 style
+```
+
+### 其他已知踩坑
+
 - AI 编造的模板会被用户删除。每个模板必须来自实际需求。
-- 图型特有的视觉（刻度交替、元素名旋转）必须放在 IgneousWR 的 plot_* 函数里，不是 figkit。
+- 图型特有的视觉（刻度交替、元素名旋转）必须放在 IgneousWR 的 `apply_*_axis_style` 后置函数里，**不是** figkit，也**不是** `plot_*` 函数主路径。
 - 使用 IgneousWR 拼版前先确认 plot_* 函数是否接受 ax 参数。SKILL.md 可能写了但代码没实现。
 - **`finalize()` 已不再处理刻度。** 刻度方向/长度/副刻度/网格/Y轴竖排全部由 IgneousWR 控制。figkit 的 `finalize()` 只做 `auto_gap` 调间距。
 - **`apply_format()` 不碰刻度方向。** 只处理：字体族、字号、轴框线粗、图例边框。
 - **`apply_style()` 不做启发式图型判断。** 只处理：数据线粗/点大小、共享图例。不做基于标签数量的刻度交替。
-- **matplotlib ≥3.8 踩坑：`Tick._direction` 和 `tick1line.set_ydata()` 均无效。** 正确做法：`tick1line.set_marker(2)` 向内、`set_marker(3)` 向外。详见 `references/matplotlib-tick-workarounds.md`。
+- **matplotlib ≥3.8 踩坑：`fig.canvas.draw()` 通过 `_update_ticks()` 重建 Tick 对象。** 因此 `set_marker(2/3)`、`set_y(offset)` 等 Tick 对象级属性必须在**最后一次** `draw()` 之后设置。在 figkit 工作流中，最后这个 draw 在 `apply_spider_axis_style()` 内部——这也是为什么步骤 6 必须放在步骤 3–5 之后。
+- **`ax.tick_params()` 全量重置 tick 属性**（非增量更新）。调用 `tick_params(length=..., width=...)` 会覆盖之前设的 `marker(2/3)`。因此图型特有的刻度方向/交替必须通过 `apply_*_axis_style` 在 `apply_format` 之后调用才能生效。
+- **`layout.finalize()` 的 `auto_gap` 已支持多对。** 用法：`layout.finalize(pairs=[('a','b'), ('c','d')])`。旧签名 `finalize(left_ax_name='a', right_ax_name='b')` 仍兼容。内部 `_axes_geom` 记录真实 row/col/rowspan/colspan，不再依赖 dict 插入顺序索引。
 
 ## 排版格式
 
@@ -103,7 +160,7 @@ plt.rcParams['xtick.minor.size'] = fmt.format_params['tick_length_minor']
 | 名字 | 说明 | 何时用 |
 |------|------|--------|
 | `A4-2x2-standard` | 4 图，每格 80×70mm | 最常用 |
-| `A4-1x2-ree-spider` | REE+蛛网并排，77×40mm | 微量元素图 |
+| `A4-1x2-ree-spider` | REE+蛛网并排，78×42mm，垂直居中 | 微量元素图（手动 top/bottom 居中） |
 | `A4-3x2-dense` | 6 图，55mm，10pt | 会议 poster/补充材料 |
 
 ## 各图型风格预设
@@ -120,13 +177,20 @@ plt.rcParams['xtick.minor.size'] = fmt.format_params['tick_length_minor']
 
 **调用：** `apply_style(layout, 'tas')`
 
-## IgneousWR / figkit 分工约定
+## IgneousWR / figkit 分工约定（2026-06-25 更新）
 
-| 谁 | 管什么 | 不能做什么 |
-|----|--------|----------|
-| **IgneousWR** | 轴标签文本内容、元素名、边界线/多边形、标准化数据、轴范围/尺度、参考线、数据分组、刻度方向/长度/副刻度/网格/Y轴竖排/X标签排列、画线设 `label=` | 不设 fontsize=；不画图例 |
-| **figkit apply_format** | 字体族、字号（轴标签/刻度/底图文本/图例统一）、轴框线粗、图例边框 | 不动元素名内容、不改刻度 |
-| **figkit apply_style** | 数据线粗/点大小/颜色（全局预设值）、共享图例（纯色点无线条，放第一个子图） | 不基于图型类型做不同处理 |
+**关键时序约束：Tick 对象级样式必须在 finalize 之后调用。**
+
+| 谁 | 管什么 | 不能做什么 | 调用时机 |
+|----|--------|----------|----------|
+| **IgneousWR `plot_*`**（内容函数） | 轴标签文本、元素名、边界线/多边形、标准化数据、轴范围/尺度、参考线、数据分组、刻度位置/值、画线设 `label=` | 不设 fontsize=；不画图例；不碰 Tick 对象级属性（set_marker） | 步骤 2 |
+| **figkit `finalize`** | auto_gap 间距测量、子图位置重排 | 不设刻度风格、字体 | 步骤 3 |
+| **IgneousWR `apply_spider_axis_style`** | Spider X 轴刻度交替内外、标签偏移、Y 竖排、Y 网格 | 不动子图位置 | 步骤 4（finalize 之后） |
+| **IgneousWR `apply_ree_axis_style`** | REE Y 竖排、Y 网格 | 不动子图位置 | 步骤 4（finalize 之后） |
+
+**DEPRECATED（新流程不再调用，tick_params 全量重置破坏后置轴样式）：**
+- `apply_format(layout, fmt)` — ~~字体族、字号、轴框线粗、图例边框~~
+- `apply_style(layout, 'default')` — ~~数据线粗/点大小/颜色、共享图例~~
 
 ## 文件结构
 
@@ -136,12 +200,20 @@ plt.rcParams['xtick.minor.size'] = fmt.format_params['tick_length_minor']
 ├── references/
 │   ├── architecture-principles.md
 │   ├── journal-format-research.md
+│   ├── matplotlib-tick-workarounds.md   # Tick 重建根因 + 方案
 │   └── journal-specs.md
+├── templates/
+│   └── ree-spider-1x2-pipeline.py       # 可复用的拼版管道模板
 └── scripts/
     ├── layout.py      A4Grid（纯定位：格子计算、add_subplot、finalize、save）
     ├── formats.py     LayoutFormat + apply_format + apply_style
     ├── styles.py      DiagramStyle 风格预设 + 调色板
     └── __init__.py    导入指引
+```
+
+复制模板到当前目录：
+```bash
+cp -r ~/.hermes/skills/plotting/figkit/templates/ ./templates/
 ```
 
 > matplotlib ≥3.8 tick 方向操控踩坑记录位于 IgneousWR skill 的 `references/matplotlib-tick-workarounds.md`。

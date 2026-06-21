@@ -1,4 +1,4 @@
-# figkit 架构设计原则（2026-06-21 最终版）
+# figkit 架构设计原则（2026-06-25 更新）
 
 ## 三个概念
 
@@ -12,26 +12,35 @@
 
 **figkit 只能管"全局统一"的，不能管"图型特有"的。**
 
-- 图型特有效果（刻度方向、刻度交替、标签偏移、Y轴网格）→ IgneousWR plot_* 函数
+- 图型特有效果（刻度方向、刻度交替、标签偏移、Y轴网格）→ IgneousWR `apply_*_axis_style` 后置函数
+- 内容级的图型设置（刻度位置/值、轴范围、参考线、标签文本）→ IgneousWR `plot_*` 函数
 - 全局统一（字体、DPI、数据点风格、图例）→ figkit
 
-## 六步出图法
+## 关键时序约束：Tick 对象级样式必须在 finalize 和 apply_format 之后调用
+
+matplotlib 3.8+ 的 `fig.canvas.draw()`（在 finalize→auto_gap 内部）通过 `_update_ticks()` 重建 Tick 对象。因此 `set_marker(2/3)` 等 Tick 对象级属性**不能**放在 `plot_*` 内容函数里——会在 finalize 时被冲掉。必须拆入 `apply_spider_axis_style(ax)` 后置函数。
+
+**`ax.tick_params()` 全量重置 tick 属性**（非增量更新）。因此后置轴样式函数必须在 apply_format (其内部也可能调 tick_params) **之后**调用。
+
+## 七步出图法（2026-06-25）
 
 ```
-1. 搭画布   → A4Grid(...)           figkit 布局
-2. 画内容   → plot_*(gd, ax=ax)     IgneousWR（所有刻度/内容都在此完成）
-3. 收尾     → layout.finalize()     figkit 布局（只做 auto_gap）
-4. 格式把关 → apply_format()         figkit 格式（字体/轴框线/图例）
-5. 风格覆盖 → apply_style()          figkit 风格（线粗/点大小/共享图例）
-6. 保存     → layout.save()          figkit 布局
+1. 搭画布        → A4Grid(...)               figkit 布局
+2. 画内容        → plot_*(gd, ax=ax)         IgneousWR 内容（不碰 Tick 对象级属性）
+3. 排版重定位    → layout.finalize(pairs=...) figkit 布局（⚠ draw 重置 Tick）
+4. 格式把关      → apply_format(layout, fmt) figkit 格式（字体/轴框线/图例）
+5. 风格覆盖      → apply_style(layout, name) figkit 风格（线粗/点大小/共享图例）
+6. 后置轴样式    → apply_spider_axis_style   IgneousWR Tick 级（每个子图单独调）
+                    / apply_ree_axis_style
+7. 保存          → layout.save(path)         figkit 布局（save 不重建 Tick）
 ```
 
 ## 各模块职责
 
 ### layout.py — A4Grid
 - 纸张尺寸、边距、格子计算
-- add_subplot 放子图
-- auto_gap 自动调整并排图的间距
+- add_subplot 放子图（保存几何到 _axes_geom）
+- auto_gap 自动调整并排图的间距（支持多对 pairs=）
 - finalize 只做 auto_gap（不碰刻度）
 - save 保存
 - 不含 style_ax、style_all、apply_format（均已清理）
@@ -54,17 +63,17 @@
 - 调色板定义
 - 传入 apply_style 调用
 
-## 明确排除出 figkit 的事项
+## 明确排除出 figkit 的事项（移至 IgneousWR 后置函数）
 
-| 事项 | 原因 | 归属 |
-|------|------|------|
-| 刻度方向(in/out) | 图型可自己决定 | IgneousWR |
-| 刻度长度 | 内容默认值 | IgneousWR |
-| 副刻度开关 | 图型特性（蜘蛛关/REE关/分类图开） | IgneousWR |
-| Y轴标签竖排 | 读性需求 | IgneousWR |
-| X轴多标签自动缩小/旋转 | 图型特性 | IgneousWR |
-| 网格线 | 图型特性 | IgneousWR |
-| 刻度交替内外 | 纯图型特性 | IgneousWR |
+| 事项 | 归属 | 所在函数 |
+|------|------|----------|
+| 刻度方向(in/out) | IgneousWR | apply_spider_axis_style |
+| 刻度交替内外 | IgneousWR | apply_spider_axis_style |
+| 副刻度开关 | IgneousWR | apply_spider_axis_style |
+| Y轴标签竖排 | IgneousWR | apply_spider_axis_style / apply_ree_axis_style |
+| Y轴网格 | IgneousWR | apply_spider_axis_style / apply_ree_axis_style |
+| 标签偏移（跟随刻度） | IgneousWR | apply_spider_axis_style |
+| X轴多标签自动缩小/旋转 | IgneousWR | 未来可能也拆出 |
 
 ## 历史清理记录
 
@@ -75,8 +84,14 @@
 - 2026-06-21: finalize() 刻度相关代码全部移除，只留 auto_gap
 - 2026-06-21: apply_style 中的刻度交替启发式代码移除（n_labels > 8）
 - 2026-06-21: LayoutFormat 默认字段中 tick_direction/major/minor_size 移除
+- **2026-06-25: layout.py auto_gap 修复：用 _axes_geom 替代 dict 插入顺序索引，支持 pairs= 多对**
+- **2026-06-25: Tick 级刻度样式从 plot_spider 拆入 apply_spider_axis_style（后置函数）**
 
 ## 踩坑
 
 - AI 编造的模板（A4-2x1-portrait、nature/elsevier 系列）已被用户删除。每个模板必须有实际需求来源。
 - `_direction` 和 `set_ydata()` 在 matplotlib≥3.8 中无效，需用 `set_marker(2/3)`。
+- `fig.canvas.draw()` 重建 Tick 对象——`set_marker` 必须在最后一次 draw 之后。
+- `ax.tick_params()` 全量重置（非增量）——后置轴样式必须在 apply_format 之后调用。
+
+

@@ -2,7 +2,7 @@
 A4Grid — A4 纸 + mm 网格 + add_axes 绝对定位排版类。
 
 用法：
-    from mpl_helpers import A4Grid
+    from layout import A4Grid
 
     layout = A4Grid(2, 2, paper='A4', left=20, right=15, top=15, bottom=20, hspace=7, wspace=7)
     ax_a = layout.add_subplot(0, 0, label='a')
@@ -12,7 +12,7 @@ A4Grid — A4 纸 + mm 网格 + add_axes 绝对定位排版类。
 
     # ... 画数据 ...
 
-    layout.finalize(left_ax_name='a', right_ax_name='b')  # 如果只有两图并排
+    layout.finalize(pairs=[('a', 'b'), ('c', 'd')])  # 多对并排
     layout.save('figure.png')
 
 已知坑（来自踩踏经验）：
@@ -27,6 +27,7 @@ class A4Grid:
     """A4纸+网格布局+add_axes绝对定位。
 
     支持多种纸张尺寸预设，mosaic 创建，colorbar 嵌入。
+    row 0 = 最顶行（与 matplotlib GridSpec / subplots 一致）。
 
     Parameters
     ----------
@@ -66,15 +67,18 @@ class A4Grid:
         self.margins = {'left': left, 'right': right, 'top': top, 'bottom': bottom}
         self.hspace, self.wspace = hspace, wspace
         self.font_scale = font_scale
+        self._y_offset = 0
         usable_w = self.paper_w - left - right
         usable_h = self.paper_h - top - bottom
         self.cell_w = (usable_w - (cols - 1) * wspace) / cols
         self.cell_h = (usable_h - (rows - 1) * hspace) / rows
+
         self.fig = plt.figure(
             figsize=(self.paper_w / 25.4, self.paper_h / 25.4),
             dpi=dpi, facecolor='white',
         )
         self._axes = {}
+        self._axes_geom = {}  # name → (row, col, rowspan, colspan)
         self.paper = paper
 
     def _mm_to_fig(self, x_mm, y_mm, w_mm, h_mm):
@@ -86,8 +90,11 @@ class A4Grid:
         ]
 
     def _cell_rect(self, row, col, rowspan=1, colspan=1):
+        """返回 [x_mm, y_mm, w_mm, h_mm]，row 0 = 最顶行。"""
         x = self.margins['left'] + col * (self.cell_w + self.wspace)
-        y = self.margins['bottom'] + row * (self.cell_h + self.hspace)
+        y = (self.paper_h - self.margins['top']
+             - (row + 1) * self.cell_h - row * self.hspace
+             - self._y_offset)
         w = self.cell_w + (colspan - 1) * (self.cell_w + self.wspace)
         h = self.cell_h + (rowspan - 1) * (self.cell_h + self.hspace)
         return [x, y, w, h]
@@ -99,6 +106,7 @@ class A4Grid:
         ax = self.fig.add_axes(rect)
         name = label or f'{row}_{col}'
         self._axes[name] = ax
+        self._axes_geom[name] = (row, col, rowspan, colspan)
         return ax
 
     def get_ax(self, name):
@@ -132,54 +140,87 @@ class A4Grid:
         cb.ax.tick_params(labelsize=fontsize - 1)
         return cb
 
-    def auto_gap(self, left_name, right_name, extra_padding_mm=3):
-        """renderer 实测右图文字向左延伸宽度，自动重排 gap。
+    def auto_gap(self, pairs=None, extra_padding_mm=3):
+        """用 renderer 实测右图文字向左延伸宽度，自动重排 gap。
 
-        ⚠️ 内部调 fig.canvas.draw() 会重置 tick._direction。
-        tick 方向覆盖必须在 auto_gap 之后。推荐用 finalize() 统一处理。
-        """
-        self.fig.canvas.draw()
-        renderer = self.fig.canvas.get_renderer()
-        inv = self.fig.transFigure.inverted()
-        left_ax, right_ax = self._axes[left_name], self._axes[right_name]
-
-        bbox = inv.transform(right_ax.yaxis.label.get_window_extent(renderer))
-        extend_mm = (right_ax.get_position().x0 - min(bbox[:, 0])) * self.paper_w
-
-        ext_panel = 0
-        for t in left_ax.texts + right_ax.texts:
-            b = inv.transform(t.get_window_extent(renderer))
-            tb_left = min(b[:, 0])
-            for ax in [left_ax, right_ax]:
-                e = (ax.get_position().x0 - tb_left) * self.paper_w
-                if e > ext_panel:
-                    ext_panel = e
-
-        gap = max(extend_mm + ext_panel + extra_padding_mm, 5)
-        if gap > self.wspace:
-            self.wspace = gap
-            usable_w = self.paper_w - self.margins['left'] - self.margins['right']
-            self.cell_w = (usable_w - (self.cols - 1) * self.wspace) / self.cols
-            for name, ax in self._axes.items():
-                idx = list(self._axes.keys()).index(name)
-                rect_mm = self._cell_rect(idx // self.cols, idx % self.cols)
-                ax.set_position(self._mm_to_fig(*rect_mm))
-        return gap
-
-    def finalize(self, left_ax_name=None, right_ax_name=None):
-        """一步完成：auto_gap 调整左右间距。
-
-        这是出图前调的最后一行。
-        刻度相关全部由 IgneousWR 控制，figkit 不碰。
+        修复说明：旧版错误地把左轴文本的左边缘与右轴 x0 做差，
+        导致 gap 被撑到几乎整个页面宽度。
+        新版只测每个文本相对它所在轴的延伸方向：
+        - 右轴元素量向左延伸（超出右轴左边界进入 gap 的距离）
+        - 左轴元素量向右延伸（超出左轴右边界进入 gap 的距离）
 
         Parameters
         ----------
-        left_ax_name, right_ax_name : str, optional
-            传给 auto_gap() 的标签名。只有两图并排时才需要。
+        pairs : list of tuple or tuple
+            （推荐）多对，如 [('ree0','sp0'), ('ree1','sp1')]。
+            单对也可传 ('a','b')。
+        extra_padding_mm : float
+            额外 padding，默认 3 mm。
+
+        ⚠️ 内部调 fig.canvas.draw() 会重置 tick._direction / Tick 对象。
+        Tick 对象级样式（set_marker 等）必须在 auto_gap **之后**设置。
         """
-        # 1. auto_gap（可选）
-        if left_ax_name and right_ax_name:
-            self.auto_gap(left_ax_name, right_ax_name)
+        if pairs is None:
+            return 0
+        # 兼容单对 ('a','b') 用法
+        if isinstance(pairs, tuple) and len(pairs) == 2 and isinstance(pairs[0], str):
+            pairs = [pairs]
+
+        self.fig.canvas.draw()
+        renderer = self.fig.canvas.get_renderer()
+        inv = self.fig.transFigure.inverted()
+
+        max_gap = self.wspace
+        for left_name, right_name in pairs:
+            left_ax, right_ax = self._axes[left_name], self._axes[right_name]
+
+            ext_panel = 0
+
+            # ── 右轴元素向左延伸（ylabel + 文本/标签） ──
+            for t in [right_ax.yaxis.label] + right_ax.texts:
+                b = inv.transform(t.get_window_extent(renderer))
+                tb_left = min(b[:, 0])
+                e = (right_ax.get_position().x0 - tb_left) * self.paper_w
+                if e > ext_panel:
+                    ext_panel = e
+
+            # ── 左轴元素向右延伸（文本/标签；ylabel 默认在左侧，不进入 gap） ──
+            for t in left_ax.texts:
+                b = inv.transform(t.get_window_extent(renderer))
+                tb_right = max(b[:, 0])
+                e = (tb_right - left_ax.get_position().x1) * self.paper_w
+                if e > ext_panel:
+                    ext_panel = e
+
+            gap = max(ext_panel + extra_padding_mm, 5)
+            if gap > max_gap:
+                max_gap = gap
+
+        if max_gap > self.wspace:
+            self.wspace = max_gap
+            usable_w = self.paper_w - self.margins['left'] - self.margins['right']
+            self.cell_w = (usable_w - (self.cols - 1) * self.wspace) / self.cols
+            for name, ax in self._axes.items():
+                row, col, rspan, cspan = self._axes_geom[name]
+                rect_mm = self._cell_rect(row, col, rspan, cspan)
+                ax.set_position(self._mm_to_fig(*rect_mm))
+        return max_gap
+
+    def finalize(self, pairs=None):
+        """一步完成：auto_gap 调整左右间距。
+
+        这是排版重定位的最后一步，之后不应再调 set_position()。
+        Tick 对象级样式（set_marker、标签偏移）必须在 finalize **之后**设置。
+
+        Parameters
+        ----------
+        pairs : list of tuple or tuple, optional
+            （推荐）多对，如 [('ree0','sp0'), ('ree1','sp1')]。
+            单对也可传 ('a','b')，不调传 None。
+        """
+        if pairs:
+            self.auto_gap(pairs=pairs)
+            return
 
 
     def save(self, path=None, bbox_inches=None, pad_inches=0.05,

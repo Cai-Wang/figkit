@@ -69,14 +69,14 @@ register(LayoutFormat(
 
 register(LayoutFormat(
     name='A4-1x2-ree-spider',
-    description='REE + 蛛网图并排 · 77×40mm 单元格',
+    description='REE + 蛛网图并排 · 78×42mm 单元格',
     layout_params={
         'rows': 1, 'cols': 2, 'paper': 'A4',
-        'left': 25, 'right': 25, 'top': 128, 'bottom': 129,
+        'left': 25, 'right': 25, 'top': 127, 'bottom': 128,
         'hspace': 0, 'wspace': 5,
     },
     format_params={'dpi': 400, 'font_size': 8, 'tick_length': 3.5, 'tick_width': 0.55, 'tick_length_minor': 2},
-    note='REE + 蛛网图。auto_gap 自动展开间距。',
+    note='REE + 蛛网图。top/bottom=127/128 手动居中 42mm cell，auto_gap 自动展开间距。',
 ))
 
 register(LayoutFormat(
