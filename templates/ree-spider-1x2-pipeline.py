@@ -24,6 +24,7 @@ from layout import A4Grid
 from igneous_wr_core import (
     GeochemData, plot_ree, plot_spider,
     apply_spider_axis_style, apply_ree_axis_style,
+    auto_xlim_padding,
 )
 
 # ════════════════════════════════════════════
@@ -51,6 +52,7 @@ plt.rcParams.update({'font.size': 9, 'font.family': 'serif', 'axes.linewidth': 0
 # REE 裸图
 fig, ax = plt.subplots(figsize=(8, 5))
 plot_ree(gd, ax=ax, **STYLE)
+auto_xlim_padding(ax)
 apply_ree_axis_style(ax)
 plt.tight_layout(pad=0.3)
 fig.savefig(os.path.join(OUT_DIR, 'ree_bare.png'), dpi=300)
@@ -58,6 +60,7 @@ fig.savefig(os.path.join(OUT_DIR, 'ree_bare.png'), dpi=300)
 # Spider 裸图
 fig, ax = plt.subplots(figsize=(8, 5))
 plot_spider(gd, ax=ax, **STYLE)
+auto_xlim_padding(ax)
 apply_spider_axis_style(ax)
 plt.tight_layout(pad=0.3)
 fig.savefig(os.path.join(OUT_DIR, 'spider_bare.png'), dpi=300)
@@ -82,6 +85,12 @@ plot_ree(gd, ax=ax_ree, **STYLE)
 plot_spider(gd, ax=ax_sp, **STYLE)
 
 layout.finalize(pairs=('ree', 'sp'))
+
+# 间距控制（可选参数）：
+#   layout.finalize(pairs=('ree', 'sp'), max_wspace=5)  # 缝不超过5mm
+#   layout.finalize(pairs=('ree', 'sp'), max_wspace=5, extra_padding_mm=1)  # 同时压缩padding
+auto_xlim_padding(ax_ree)
+auto_xlim_padding(ax_sp)
 apply_ree_axis_style(ax_ree)
 apply_spider_axis_style(ax_sp)
 layout.save(os.path.join(OUT_DIR, 'ree_spider_panel.png'))

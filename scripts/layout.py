@@ -140,29 +140,30 @@ class A4Grid:
         cb.ax.tick_params(labelsize=fontsize - 1)
         return cb
 
-    def auto_gap(self, pairs=None, extra_padding_mm=3):
-        """用 renderer 实测右图文字向左延伸宽度，自动重排 gap。
+    def auto_gap(self, pairs=None, extra_padding_mm=3, max_wspace=None,
+                apply=True):
+        """用 renderer 实测标签间距，返回建议值。
 
-        修复说明：旧版错误地把左轴文本的左边缘与右轴 x0 做差，
-        导致 gap 被撑到几乎整个页面宽度。
-        新版只测每个文本相对它所在轴的延伸方向：
-        - 右轴元素量向左延伸（超出右轴左边界进入 gap 的距离）
-        - 左轴元素量向右延伸（超出左轴右边界进入 gap 的距离）
+        新设计（v2）：默认只报告，不强制改间距。
+        设 apply=True 恢复旧行为（自动重排子图位置）。
 
         Parameters
         ----------
         pairs : list of tuple or tuple
-            （推荐）多对，如 [('ree0','sp0'), ('ree1','sp1')]。
-            单对也可传 ('a','b')。
+            多对，如 [('ree0','sp0'), ('ree1','sp1')]，单对也可传 ('a','b')。
         extra_padding_mm : float
-            额外 padding，默认 3 mm。
+            额外留白，默认 3 mm。
+        max_wspace : float or None
+            最大值上限，mm。
+        apply : bool
+            True 时自动用建议值重排子图位置；False 时只返回建议值。
 
-        ⚠️ 内部调 fig.canvas.draw() 会重置 tick._direction / Tick 对象。
-        Tick 对象级样式（set_marker 等）必须在 auto_gap **之后**设置。
+        Returns
+        -------
+        dict : {'gap': 建议mm, 'current': 当前mm, 'collision': bool}
         """
         if pairs is None:
-            return 0
-        # 兼容单对 ('a','b') 用法
+            return {'gap': self.wspace, 'current': self.wspace, 'collision': False}
         if isinstance(pairs, tuple) and len(pairs) == 2 and isinstance(pairs[0], str):
             pairs = [pairs]
 
@@ -171,56 +172,92 @@ class A4Grid:
         inv = self.fig.transFigure.inverted()
 
         max_gap = self.wspace
+        collision = False
         for left_name, right_name in pairs:
             left_ax, right_ax = self._axes[left_name], self._axes[right_name]
+            left_x1 = left_ax.get_position().x1
 
             ext_panel = 0
 
-            # ── 右轴元素向左延伸（ylabel + yticklabels + 文本） ──
-            for t in [right_ax.yaxis.label] + right_ax.get_yticklabels() + right_ax.texts:
-                b = inv.transform(t.get_window_extent(renderer))
-                tb_left = min(b[:, 0])
-                e = (right_ax.get_position().x0 - tb_left) * self.paper_w
-                if e > ext_panel:
-                    ext_panel = e
+            # 规则1: 右图有 Y 轴标签 → 防标签和左框打架
+            # 同时也要测 ytick 数字（可能比标题更长）
+            yl = right_ax.yaxis.label
+            if yl.get_text():
+                # 测 ylabel + yticks 中最左的
+                all_elems = [right_ax.yaxis.label] + right_ax.get_yticklabels()
+            else:
+                all_elems = right_ax.get_yticklabels()
 
-            # ── 左轴元素向右延伸（文本/标签；ylabel 默认在左侧，不进入 gap） ──
+            if all_elems:
+                for elem in all_elems:
+                    b = inv.transform(elem.get_window_extent(renderer))
+                    # 直接用 bbox 绝对位置的最左端
+                    elem_left = min(b[:, 0]) * self.paper_w
+                    e = left_x1 * self.paper_w - elem_left
+                    # e > 0 表示标签离左框还有距离（安全）
+                    # e < 0 表示标签超出左框（打架），距= -e
+                    if e > ext_panel:
+                        ext_panel = e
+
+            # 左图文本向右伸
             for t in left_ax.texts:
                 b = inv.transform(t.get_window_extent(renderer))
-                tb_right = max(b[:, 0])
-                e = (tb_right - left_ax.get_position().x1) * self.paper_w
+                tb_right = max(b[:, 0]) * self.paper_w
+                right_x0 = right_ax.get_position().x0 * self.paper_w
+                e = tb_right - right_x0
                 if e > ext_panel:
                     ext_panel = e
 
-            gap = max(ext_panel + extra_padding_mm, 5)
+            desired = ext_panel + extra_padding_mm
+            gap = desired
+            if max_wspace is not None:
+                gap = min(gap, max_wspace)
             if gap > max_gap:
                 max_gap = gap
+            if desired > self.wspace:
+                collision = True
 
-        if max_gap > self.wspace:
-            self.wspace = max_gap
+        # 不强制 suggest = max(max_gap, self.wspace) … 嗯，建议值直接用 max_gap
+        suggested = max_gap
+
+        if apply and suggested != self.wspace:
+            self.wspace = suggested
             usable_w = self.paper_w - self.margins['left'] - self.margins['right']
             self.cell_w = (usable_w - (self.cols - 1) * self.wspace) / self.cols
             for name, ax in self._axes.items():
                 row, col, rspan, cspan = self._axes_geom[name]
                 rect_mm = self._cell_rect(row, col, rspan, cspan)
                 ax.set_position(self._mm_to_fig(*rect_mm))
-        return max_gap
 
-    def finalize(self, pairs=None):
-        """一步完成：auto_gap 调整左右间距。
+        return {
+            'gap': suggested,
+            'current': self.wspace,
+            'collision': collision,
+        }
 
-        这是排版重定位的最后一步，之后不应再调 set_position()。
-        Tick 对象级样式（set_marker、标签偏移）必须在 finalize **之后**设置。
+    def finalize(self, pairs=None, extra_padding_mm=3, max_wspace=None,
+                apply=False):
+        """排版最后一步：auto_gap 检测标签冲突并给出建议。
 
         Parameters
         ----------
         pairs : list of tuple or tuple, optional
-            （推荐）多对，如 [('ree0','sp0'), ('ree1','sp1')]。
-            单对也可传 ('a','b')，不调传 None。
+            多对，如 [('ree0','sp0'), ('ree1','sp1')]，单对也可传 ('a','b')。
+        extra_padding_mm : float
+            额外留白，默认 3 mm。
+        max_wspace : float or None
+            最大值上限，mm。不传无上限。
+        apply : bool
+            True 时自动用建议值重排子图；False（默认）时只报告。
+
+        Returns
+        -------
+        dict or None
         """
         if pairs:
-            self.auto_gap(pairs=pairs)
-            return
+            result = self.auto_gap(pairs=pairs, extra_padding_mm=extra_padding_mm,
+                                   max_wspace=max_wspace, apply=apply)
+            return result
 
 
     def save(self, path=None, bbox_inches=None, pad_inches=0.05,
